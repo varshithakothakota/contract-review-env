@@ -1,0 +1,86 @@
+name: ContractReviewEnv
+version: 1.0.0
+tags:
+  - openenv
+  - legal
+  - contract-review
+  - nlp
+  - real-world
+  - compliance
+  - risk-analysis
+
+description: >
+  An AI agent acts as a junior legal analyst reviewing contracts for
+  missing clauses, risk indicators, and compliance issues. The agent
+  must systematically read each clause, flag problems with correct
+  severity (critical/high/medium/low), approve clean clauses, assess
+  overall risk, and recommend a course of action — all within a limited
+  number of steps.
+
+tasks:
+  - id: task_easy
+    description: "Review a 7-clause NDA: find 1 critical missing clause + 1 high issue"
+    difficulty: easy
+    max_steps: 25
+    score_range: [0.0, 1.0]
+
+  - id: task_medium
+    description: "Review a Software Services Agreement with 3 critical + 2 high + 2 medium issues"
+    difficulty: medium
+    max_steps: 35
+    score_range: [0.0, 1.0]
+
+  - id: task_hard
+    description: "Review a 10-clause Enterprise License Agreement with 3 critical + 3 high + 1 medium issues"
+    difficulty: hard
+    max_steps: 45
+    score_range: [0.0, 1.0]
+
+observation_space:
+  type: object
+  model: server.environment.ContractObservation
+  fields:
+    contract_title: string
+    contract_type: string
+    clauses: "List[ClauseItem] — each with id, title, text, flags"
+    issues_found: "List[Dict] — issues flagged so far"
+    approved_clauses: "List[str] — clause IDs approved"
+    risk_assessments: "Dict[str, str] — risk per clause"
+    recommendation: "Optional[str]"
+    step_number: int
+    max_steps: int
+    done: bool
+
+action_space:
+  type: object
+  model: server.environment.ContractAction
+  action_types:
+    view_clause:      "Read a clause in detail"
+    flag_issue:       "Flag a problem with severity + description"
+    approve_clause:   "Mark a clause as acceptable"
+    assess_risk:      "Set risk level (red/amber/green) for clause or overall"
+    add_comment:      "Add a review comment"
+    recommend_action: "Set overall recommendation"
+    request_revision: "Request contract revision (shorthand)"
+    finalize_review:  "Complete the review and end episode"
+
+reward_space:
+  type: float
+  range: [-1.0, 1.0]
+  per_step: true
+  components:
+    issue_detection:   "Reward for correctly flagging real issues (+0.3 to +1.0)"
+    severity_accuracy: "Partial credit for correct severity classification"
+    false_positives:   "Penalty for flagging clean clauses (-0.15)"
+    wrong_approval:    "Penalty for approving problematic clauses (-0.2)"
+    risk_accuracy:     "Reward for correct overall risk assessment (+0.4)"
+    recommendation:    "Reward for correct final recommendation (+0.4)"
+    finalization:      "Completion bonus based on coverage (0–0.5)"
+
+api:
+  reset: "POST /reset"
+  step:  "POST /step"
+  state: "GET /state"
+  grade: "POST /grade"
+  tasks: "GET /tasks"
+  health: "GET /health"
