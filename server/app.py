@@ -181,3 +181,23 @@ def openenv_yaml():
                 "state": "GET /state", "grade": "POST /grade"},
     }
     return yaml.dump(data, default_flow_style=False)
+
+
+# ── Entry point (required by openenv validator) ───────────────────────────────
+
+def main() -> None:
+    """Start the server. Called by `uv run server` and openenv validator."""
+    import os
+    import uvicorn
+    uvicorn.run(
+        "server.app:app",
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "7860")),
+        workers=1,
+        log_level="info",
+    )
+
+
+if __name__ == "__main__":
+    main()
+    
