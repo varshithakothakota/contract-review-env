@@ -19,14 +19,14 @@ STDOUT FORMAT:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
 import textwrap
+import urllib.request
+import urllib.error
 from typing import Any, Dict, List, Optional
 
-import httpx
 from openai import OpenAI
 
 # ── Env vars (defaults ONLY for API_BASE_URL and MODEL_NAME) ────────────────
@@ -70,38 +70,57 @@ def log_end(success: bool, steps: int, score: float,
     )
 
 
-# ── HTTP client ──────────────────────────────────────────────────────────────
+# ── HTTP client using only stdlib urllib (no httpx needed) ───────────────────
+
+def _http_post(url: str, body: Dict) -> Dict:
+    """POST JSON using stdlib urllib — zero external dependencies."""
+    data = json.dumps(body).encode("utf-8")
+    req  = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode()}")
+
+
+def _http_get(url: str) -> Dict:
+    """GET JSON using stdlib urllib."""
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode()}")
+
 
 class ContractReviewClient:
     def __init__(self, base_url: str, task_id: str):
         self.base_url = base_url.rstrip("/")
         self.task_id  = task_id
-        self._http    = httpx.AsyncClient(timeout=30.0)
 
-    async def reset(self) -> Dict[str, Any]:
-        r = await self._http.post(f"{self.base_url}/reset",
-                                  json={"task_id": self.task_id})
-        r.raise_for_status()
-        return r.json()
+    def reset(self) -> Dict[str, Any]:
+        return _http_post(f"{self.base_url}/reset",
+                          {"task_id": self.task_id})
 
-    async def step(self, action: Dict) -> Dict[str, Any]:
-        r = await self._http.post(f"{self.base_url}/step",
-                                  json={"task_id": self.task_id, "action": action})
-        r.raise_for_status()
-        return r.json()
+    def step(self, action: Dict) -> Dict[str, Any]:
+        return _http_post(f"{self.base_url}/step",
+                          {"task_id": self.task_id, "action": action})
 
-    async def grade(self) -> Dict[str, Any]:
-        r = await self._http.post(f"{self.base_url}/grade",
-                                  json={"task_id": self.task_id})
-        r.raise_for_status()
-        return r.json()
+    def grade(self) -> Dict[str, Any]:
+        return _http_post(f"{self.base_url}/grade",
+                          {"task_id": self.task_id})
 
-    async def close(self) -> None:
-        await self._http.aclose()
+    def close(self) -> None:
+        pass  # no persistent connection to close
 
     @classmethod
-    async def from_docker_image(cls, image: str, task_id: str,
-                                port: int = 7860) -> "ContractReviewClient":
+    def from_docker_image(cls, image: str, task_id: str,
+                          port: int = 7860) -> "ContractReviewClient":
         import subprocess, time
         subprocess.Popen(["docker", "run", "--rm", "-d",
                           "--name", f"contract-review-{task_id}",
@@ -114,7 +133,7 @@ class ContractReviewClient:
 
 SYSTEM_PROMPT = textwrap.dedent("""
 You are an expert junior legal analyst reviewing contracts.
-Respond with ONE valid JSON action per step.
+Respond with ONE valid JSON action per step on a single line.
 
 Available action_types:
   view_clause      → {"action_type":"view_clause","clause_id":"c01"}
@@ -126,23 +145,14 @@ Available action_types:
   finalize_review  → {"action_type":"finalize_review"}
 
 Strategy:
-1. View each clause systematically
-2. Flag issues with correct severity:
-   - critical: missing clause, unlimited liability, one-sided IP assignment
-   - high: unfavourable payment terms, short notice periods, weak SLA
-   - medium: vague language, short confidentiality period
-3. Approve clean clauses
-4. Assess overall risk (red/amber/green)
-5. Recommend action and finalize
+1. View each clause, flag issues with correct severity
+2. [MISSING CLAUSE] in text → always critical severity
+3. Unlimited liability / full IP assignment → critical
+4. Payment >60 days / notice <14 days → high
+5. Approve clean clauses
+6. Assess overall risk, recommend action, finalize
 
-Severity guide:
-- [MISSING CLAUSE] in text → always critical
-- Unlimited liability/damages → critical
-- IP fully assigned to other party → critical
-- Payment >60 days / interest >10% → high
-- Notice <14 days → high
-
-Respond with ONE JSON on a single line.
+Respond with ONE JSON on a single line. No markdown.
 """).strip()
 
 
@@ -151,31 +161,30 @@ def _build_prompt(obs: Dict, step: int, history: List[str]) -> str:
     lines = [
         f"Contract: {obs.get('contract_title')} ({obs.get('contract_type')})",
         f"Step {step}/{obs.get('max_steps',25)} | "
-        f"Issues found: {len(obs.get('issues_found',[]))} | "
+        f"Issues: {len(obs.get('issues_found',[]))} | "
         f"Approved: {len(obs.get('approved_clauses',[]))}",
         f"Last: {obs.get('last_action_result','none')}",
-        "",
         "CLAUSES:",
     ]
     for c in clauses:
-        status = ("❌MISSING" if c.get("is_missing")
-                  else "🚩FLAGGED" if c.get("is_flagged")
-                  else "✅APPROVED" if c.get("is_approved")
-                  else "⬜UNREVIEWED")
-        lines.append(f"  [{c['clause_id']}] {status} {c['title']}")
-        lines.append(f"    {c['text'][:120]}")
+        status = ("MISSING" if c.get("is_missing")
+                  else "FLAGGED" if c.get("is_flagged")
+                  else "APPROVED" if c.get("is_approved")
+                  else "UNREVIEWED")
+        lines.append(f"  [{c['clause_id']}] {status} {c['title']}: {c['text'][:100]}")
     if obs.get("issues_found"):
-        lines.append("")
-        lines.append("Issues flagged: " + ", ".join(
-            f"{i['clause_id']}({i['severity']})" for i in obs["issues_found"]
+        lines.append("Flagged: " + ", ".join(
+            f"{i['clause_id']}({i['severity']})"
+            for i in obs["issues_found"]
         ))
     if history:
         lines.append("Recent: " + " | ".join(history[-3:]))
-    lines.append("\nRespond with ONE JSON action.")
+    lines.append("Respond with ONE JSON action.")
     return "\n".join(lines)
 
 
-def _call_llm(client: OpenAI, obs: Dict, step: int, history: List[str]) -> Optional[Dict]:
+def _call_llm(client: OpenAI, obs: Dict, step: int,
+              history: List[str]) -> Optional[Dict]:
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -188,8 +197,9 @@ def _call_llm(client: OpenAI, obs: Dict, step: int, history: List[str]) -> Optio
         )
         text = (resp.choices[0].message.content or "").strip()
         if text.startswith("```"):
-            text = "\n".join(l for l in text.split("\n")
-                             if not l.startswith("```")).strip()
+            text = "\n".join(
+                l for l in text.split("\n") if not l.startswith("```")
+            ).strip()
         return json.loads(text)
     except Exception as exc:
         print(f"[DEBUG] LLM error: {exc}", flush=True)
@@ -198,31 +208,29 @@ def _call_llm(client: OpenAI, obs: Dict, step: int, history: List[str]) -> Optio
 
 def _fallback(obs: Dict) -> Dict:
     """Heuristic agent when LLM fails."""
-    clauses = obs.get("clauses", [])
-    flagged = {i["clause_id"] for i in obs.get("issues_found", [])}
+    clauses  = obs.get("clauses", [])
+    flagged  = {i["clause_id"] for i in obs.get("issues_found", [])}
     approved = set(obs.get("approved_clauses", []))
 
-    # Find next unreviewed clause
     for c in clauses:
-        cid = c["clause_id"]
+        cid  = c["clause_id"]
+        text = c.get("text", "").lower()
         if cid in flagged or cid in approved:
             continue
-        if c.get("is_missing") or "MISSING" in c.get("text", ""):
+        if c.get("is_missing") or "missing" in text:
             return {"action_type": "flag_issue", "clause_id": cid,
                     "severity": "critical",
                     "issue_description": "Missing clause — not present in contract"}
-        # Simple keyword heuristics
-        text = c.get("text", "").lower()
-        if any(w in text for w in ["90 days", "unlimited", "all rights", "25%"]):
+        if any(w in text for w in ["unlimited","all rights","90 days","25%","7 days"]):
             return {"action_type": "flag_issue", "clause_id": cid,
                     "severity": "high",
                     "issue_description": "Potentially unfavourable terms detected"}
-        return {"action_type": "view_clause", "clause_id": cid}
+        if not c.get("is_flagged") and not c.get("is_approved"):
+            return {"action_type": "view_clause", "clause_id": cid}
 
-    # All clauses reviewed — finalise
     if not obs.get("risk_assessments"):
-        n_issues = len(obs.get("issues_found", []))
-        risk = "red" if n_issues >= 3 else "amber" if n_issues >= 1 else "green"
+        n = len(obs.get("issues_found", []))
+        risk = "red" if n >= 3 else "amber" if n >= 1 else "green"
         return {"action_type": "assess_risk", "clause_id": "overall",
                 "risk_level": risk}
     if not obs.get("recommendation"):
@@ -233,7 +241,7 @@ def _fallback(obs: Dict) -> Dict:
 
 # ── Task runner ──────────────────────────────────────────────────────────────
 
-async def run_task(task_id: str, llm_client: OpenAI) -> float:
+def run_task(task_id: str, llm_client: OpenAI) -> float:
     max_steps   = MAX_STEPS_MAP.get(task_id, 25)
     score       = 0.0
     success     = False
@@ -242,24 +250,24 @@ async def run_task(task_id: str, llm_client: OpenAI) -> float:
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-    env = (await ContractReviewClient.from_docker_image(LOCAL_IMAGE_NAME, task_id)
+    env = (ContractReviewClient.from_docker_image(LOCAL_IMAGE_NAME, task_id)
            if LOCAL_IMAGE_NAME
            else ContractReviewClient(ENV_BASE_URL, task_id))
 
     history: List[str] = []
 
     try:
-        obs  = await env.reset()
+        obs  = env.reset()
         done = False
         step = 0
 
         while not done and step < max_steps:
             step += 1
-            action = _call_llm(llm_client, obs, step, history) or _fallback(obs)
+            action     = _call_llm(llm_client, obs, step, history) or _fallback(obs)
             action_str = json.dumps(action, separators=(",", ":"))
 
             try:
-                result = await env.step(action)
+                result = env.step(action)
                 reward = float(result.get("reward", 0.0))
                 done   = bool(result.get("done", False))
                 obs    = result.get("observation", obs)
@@ -277,7 +285,7 @@ async def run_task(task_id: str, llm_client: OpenAI) -> float:
             )
 
         try:
-            gr = await env.grade()
+            gr    = env.grade()
             score = float(gr.get("score", 0.0))
         except Exception:
             score = sum(rewards) / max(1, len(rewards))
@@ -287,9 +295,9 @@ async def run_task(task_id: str, llm_client: OpenAI) -> float:
 
     finally:
         try:
-            await env.close()
-        except Exception as e:
-            print(f"[DEBUG] close error: {e}", flush=True)
+            env.close()
+        except Exception:
+            pass
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return score
@@ -297,14 +305,14 @@ async def run_task(task_id: str, llm_client: OpenAI) -> float:
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
-async def main() -> None:
+def main() -> None:
     llm_client   = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     task_env     = os.getenv("TASK_ID")
     tasks_to_run = [task_env] if task_env and task_env in TASKS else TASKS
 
     scores: List[float] = []
     for tid in tasks_to_run:
-        s = await run_task(tid, llm_client)
+        s = run_task(tid, llm_client)
         scores.append(s)
 
     if len(scores) > 1:
@@ -312,4 +320,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
