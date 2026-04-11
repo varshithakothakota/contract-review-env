@@ -1,0 +1,40 @@
+name: ContractReviewEnv
+version: 1.0.0
+tags: [openenv, legal, contract-review, nlp, real-world, compliance]
+description: >
+  AI agent acts as a senior legal analyst reviewing commercial contracts
+  for missing clauses, risky terms, and compliance gaps. Tasks use realistic
+  legal language requiring genuine reasoning — not keyword matching.
+tasks:
+  - id: task_easy
+    description: "11-clause NDA: 1 critical (one-sided obligations) + 1 high (inadequate term)"
+    difficulty: easy
+    max_steps: 30
+    score_range: [0.0, 1.0]
+    baseline_score: 0.42
+  - id: task_medium
+    description: "10-clause Software Services: 3 critical + 2 high + 3 medium"
+    difficulty: medium
+    max_steps: 40
+    score_range: [0.0, 1.0]
+    baseline_score: 0.38
+  - id: task_hard
+    description: "11-clause Enterprise SaaS: 2 critical + 3 high + 2 medium in complex legal language"
+    difficulty: hard
+    max_steps: 50
+    score_range: [0.0, 1.0]
+    baseline_score: 0.31
+reward_components:
+  - flag_critical_correct: "+0.55 to +0.80 (+ severity accuracy bonus)"
+  - flag_high_correct: "+0.35 to +0.52"
+  - flag_medium_correct: "+0.18 to +0.26"
+  - false_positive: "-0.20"
+  - wrong_approval: "-0.25"
+  - correct_risk_rating: "+0.35"
+  - correct_recommendation: "+0.35"
+  - submit_coverage_bonus: "0.0 to +0.55"
+api:
+  reset: "POST /reset"
+  step:  "POST /step"
+  state: "GET /state"
+  grade: "POST /grade"
