@@ -756,7 +756,7 @@ def grade_task(task_id: str, state: Dict) -> Tuple[float, Dict]:
              - c["fp_pen"]
              - c["wa_pen"])
 
-    score = round(max(0.0, min(1.0, raw)), 3)
+    score = round(max(0.001, min(0.999, raw)), 3)
     return score, {
         "critical_recall": round(c["c_det"], 3),
         "high_recall":     round(c["h_det"], 3),
